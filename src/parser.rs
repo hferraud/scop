@@ -1,28 +1,31 @@
-use std::fs::File;
-use std::io;
-use std::io::{BufRead, BufReader, Lines};
-// use crate::object::{Object, Vertex, Face};
+mod token;
+mod statement;
 
-pub fn parser(path: &str) -> Result<(), io::Error> {
-    let lines = read_lines(path)?;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Lines};
+pub use token::Token;
+use crate::object::Object;
+use crate::parser::token::RemoveComment;
+
+pub fn parse(path: &str) -> Result<Object, io::Error> {
+    let mut object= Object::new();
+    let lines = file_read_lines(path)?;
 
     for line in lines.flatten() {
-        parse_line(line)?
+        line_parse(line, &mut object)?;
     }
-    Ok(())
+    Ok(object)
 }
 
-pub fn read_lines(path: &str) -> io::Result<Lines<BufReader<File>>> {
+fn file_read_lines(path: &str) -> io::Result<Lines<BufReader<File>>> {
     let file = File::open(path)?;
     Ok(BufReader::new(file).lines())
 }
 
-pub fn parse_line(line: String) -> Result<(), io::Error>{
-    let mut tokens = line.split(' ');
-    if let Some(id) = tokens.next() {
-        println!("token: {}", id);
-    } else {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid line"))
-    }
+fn line_parse(line: String, object: &mut Object) -> Result<(), io::Error> {
+    let mut tokens = Token::lex(&line);
+
+    tokens.remove_comment();
+    statement::statement_router(tokens, object)?;
     Ok(())
 }
