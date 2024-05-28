@@ -24,7 +24,7 @@ impl Face {
         Ok(())
     }
 
-    pub fn argument_parse(&mut self, token: Token, object: & mut Object) -> Result<(), io::Error> {
+    fn argument_parse(&mut self, token: Token, object: & mut Object) -> Result<(), io::Error> {
         let parameters: Vec<String> = token.extract_value()?
             .split('/')
             .map(|s| s.to_string())
@@ -40,21 +40,33 @@ impl Face {
         let vt = parse_optional_usize(parameters.get(1))?;
         let vn = parse_optional_usize(parameters.get(2))?;
         self.push_arg(v, vt, vn, object)?;
+        self.check_vector_len()?;
+        Ok(())
+    }
+
+    fn check_vector_len(&self) -> Result<(), io::Error> {
+        let v_len = self.vertices.len();
+        let vt_len = self.vertices_texture.len();
+        let vn_len = self.vertices_normal.len();
+        if (vt_len != v_len && vt_len != 0) || (vn_len != v_len && vn_len != 0) {
+            return Err(error::invalid_statement());
+        }
         Ok(())
     }
 }
 
-pub fn parse_usize(str: &String) -> Result<Option<usize>, io::Error> {
+fn parse_usize(str: &String) -> Result<Option<usize>, io::Error> {
     match str.is_empty() {
         true => Ok(None),
-        false => Ok(Some(str.parse().map_err(|e| error::custom(e))?))
+        false => Ok(Some(str.parse().map_err(error::custom)?))
     }
 }
 
-pub fn parse_optional_usize(opt: Option<&String>) -> Result<Option<usize>, io::Error> {
+fn parse_optional_usize(opt: Option<&String>) -> Result<Option<usize>, io::Error> {
     let res = match opt {
         Some(str) => parse_usize(str)?,
         None => None,
     };
     Ok(res)
 }
+
