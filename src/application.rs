@@ -7,6 +7,9 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
 use engine::Engine;
 
+const WIDTH: u32 = 800;
+const HEIGHT: u32 = 600;
+
 pub struct Application {
     window: Option<Arc<Window>>,
     engine: Option<Engine>,
@@ -25,7 +28,11 @@ impl ApplicationHandler for Application {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let window = event_loop
-                .create_window(Window::default_attributes().with_title("Scop"))
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Scop")
+                        .with_inner_size(winit::dpi::LogicalSize::new(WIDTH, HEIGHT))
+                )
                 .expect("Couldn't create window");
             self.window = Some(Arc::new(window));
         }
