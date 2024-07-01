@@ -1,4 +1,6 @@
-use std::collections::HashSet;
+extern crate vulkano;
+
+use ahash::HashSet;
 use std::sync::Arc;
 use winit::{
     window::{
@@ -9,35 +11,41 @@ use winit::{
     },
 };
 
-use vulkano::{
-    instance::{
-        Instance,
-        InstanceCreateInfo,
-        InstanceExtensions,
-        debug::{
-            DebugUtilsMessenger,
-            DebugUtilsMessengerCallback,
-            DebugUtilsMessengerCreateInfo,
-        }
-    },
-    device::{
-        Device,
-        DeviceCreateInfo,
-        DeviceExtensions,
-        Features,
-        Queue,
-        QueueCreateInfo,
-        QueueFlags,
-        physical::PhysicalDevice,
-    },
-    swapchain::Surface,
-    Version,
-    VulkanLibrary
-};
+use vulkano::{instance::{
+    Instance,
+    InstanceCreateInfo,
+    InstanceExtensions,
+    debug::{
+        DebugUtilsMessenger,
+        DebugUtilsMessengerCallback,
+        DebugUtilsMessengerCreateInfo,
+    }
+}, device::{
+    Device,
+    DeviceCreateInfo,
+    DeviceExtensions,
+    Features,
+    Queue,
+    QueueCreateInfo,
+    QueueFlags,
+    physical::PhysicalDevice,
+}, swapchain::Surface, Version, VulkanLibrary};
 use vulkano::format::Format;
-use vulkano::image::{Image, ImageUsage};
+use vulkano::image::{Image, ImageLayout, ImageUsage};
+use vulkano::image::view::ImageView;
+use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::vertex_input::VertexInputState;
+use vulkano::pipeline::graphics::viewport::{Scissor, Viewport, ViewportState};
+use vulkano::pipeline::{DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
+use vulkano::pipeline::graphics::multisample::MultisampleState;
+use vulkano::pipeline::graphics::rasterization::{CullMode, FrontFace, RasterizationState};
+use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo};
+use vulkano::render_pass::{AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp, Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass, SubpassDescription};
 use vulkano::swapchain::{ColorSpace, CompositeAlpha, PresentMode, SurfaceCapabilities, Swapchain, SwapchainCreateInfo};
-use vulkano::sync::{Sharing, SharingMode};
+use vulkano::sync::Sharing;
+use vulkano_shaders;
 use crate::application::{HEIGHT, WIDTH};
 
 const VALIDATION_LAYERS: &[&str] = &[
@@ -114,14 +122,17 @@ impl SwapChainSupport {
 
 pub struct Engine {
     instance: Arc<Instance>,
+    debug_messenger: Option<DebugUtilsMessenger>,
     surface: Arc<Surface>,
     physical_device: Arc<PhysicalDevice>,
     device: Arc<Device>,
     graphics_queue: Arc<Queue>,
     present_queue: Arc<Queue>,
     swap_chain: Arc<Swapchain>,
-    swap_chain_images: Vec<Arc<Image>>
-    debug_messenger: Option<DebugUtilsMessenger>,
+    swap_chain_images: Vec<Arc<Image>>,
+    render_pass: Arc<RenderPass>,
+    graphics_pipeline: Arc<GraphicsPipeline>,
+    framebuffers: Vec<Arc<Framebuffer>>
 }
 
 impl Engine {
@@ -139,11 +150,21 @@ impl Engine {
             &physical_device,
             &surface,
             &device,
-            &graphics_queue,
-            &present_queue,
+        );
+        let render_pass = Self::create_render_pass(&device, &swap_chain);
+        let graphics_pipeline = Self::create_graphics_pipeline(
+            &device,
+            swap_chain.image_extent(),
+            &render_pass,
+        );
+        let framebuffers = Self::create_framebuffers(
+            &render_pass,
+            &swap_chain_images,
+            swap_chain.image_extent(),
         );
         Self {
             instance,
+            debug_messenger,
             surface,
             physical_device,
             device,
@@ -151,7 +172,9 @@ impl Engine {
             present_queue,
             swap_chain,
             swap_chain_images,
-            debug_messenger,
+            render_pass,
+            graphics_pipeline,
+            framebuffers,
         }
     }
 
@@ -281,8 +304,6 @@ impl Engine {
         physical_device: &PhysicalDevice,
         surface: &Arc<Surface>,
         device: &Arc<Device>,
-        graphic_queue: &Arc<Queue>,
-        present_queue: &Arc<Queue>,
     ) -> (Arc<Swapchain>, Vec<Arc<Image>>){
         let swap_chain_support = SwapChainSupport::new(physical_device, surface);
         let surface_format = Self::select_swap_surface_format(&swap_chain_support.formats);
@@ -350,7 +371,151 @@ impl Engine {
         }
     }
 
-    // VALIDATION LAYERS SETUP
+    // RENDER PASS
+
+    fn create_render_pass(device: &Arc<Device>, swap_chain: &Arc<Swapchain>) -> Arc<RenderPass>{
+        let color_attachments = vec![
+            AttachmentDescription {
+                format: swap_chain.image_format(),
+                load_op: AttachmentLoadOp::Clear,
+                store_op: AttachmentStoreOp::Store,
+                final_layout: ImageLayout::PresentSrc,
+                ..Default::default()
+            }
+        ];
+        let color_attachments_ref = AttachmentReference {
+            attachment: 0,
+            layout: ImageLayout::ColorAttachmentOptimal,
+            ..Default::default()
+        };
+        let subpasses = vec![
+            SubpassDescription {
+                color_attachments: vec![Some(color_attachments_ref)],
+                ..Default::default()
+            }
+        ];
+        let create_info = RenderPassCreateInfo {
+            attachments: color_attachments,
+            subpasses,
+            ..Default::default()
+        };
+        RenderPass::new(
+            device.clone(),
+            create_info,
+        ).expect("Failed to create render pass")
+    }
+
+    // GRAPHIC PIPELINE
+
+    fn create_graphics_pipeline(
+        device: &Arc<Device>,
+        image_extent: [u32; 2],
+        render_pass: &Arc<RenderPass>,
+    ) -> Arc<GraphicsPipeline> {
+        mod vertex_shader {
+            vulkano_shaders::shader! {
+                ty: "vertex",
+                path: "src/shaders/shader.vert"
+            }
+        }
+
+        mod fragment_shader {
+            vulkano_shaders::shader! {
+                ty: "fragment",
+                path: "src/shaders/shader.frag"
+            }
+        }
+
+        let vert_shader_module = vertex_shader::load(device.clone())
+            .expect("Failed to create vertex shader module")
+            .entry_point("main")
+            .expect("Failed to set vertex shader entrypoint");
+        let frag_shader_module = fragment_shader::load(device.clone())
+            .expect("Failed to create fragment shader module")
+            .entry_point("main")
+            .expect("Failed to set fragment shader entrypoint");
+
+        let stages = [
+            PipelineShaderStageCreateInfo::new(vert_shader_module),
+            PipelineShaderStageCreateInfo::new(frag_shader_module),
+        ];
+        let viewport_state = Some(ViewportState {
+            viewports: [Viewport {
+                extent: [image_extent[0] as f32, image_extent[1] as f32],
+                ..Default::default()
+            }].into(),
+            scissors: [Scissor {
+                extent: image_extent,
+                ..Default::default()
+            }].into(), //TODO: verify that this cannot be set to default
+            ..Default::default()
+        });
+        let mut dynamic_state: HashSet<DynamicState> = Default::default();
+        dynamic_state.insert(DynamicState::Viewport);
+        dynamic_state.insert(DynamicState::Scissor);
+        let rasterization_state = Some(RasterizationState {
+            cull_mode: CullMode::Back,
+            front_face: FrontFace::Clockwise,
+            ..Default::default()
+        });
+        let multisample_state = Some(MultisampleState::default());
+        let color_blend_state = Some(ColorBlendState {
+            attachments: vec![ColorBlendAttachmentState::default()],
+            ..Default::default()
+        });
+        let layout = PipelineLayout::new(
+            device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+                .into_pipeline_layout_create_info(device.clone())
+                .expect("Failed to create a pipeline layout from stages")
+        ).expect("Failed to create a pipeline layout");
+        let subpass = Subpass::from(render_pass.clone(), 0)
+            .expect("Failed to get subpass from render pass");
+        let create_info = GraphicsPipelineCreateInfo {
+            stages: stages.into_iter().collect(),
+            vertex_input_state: Some(VertexInputState::new()),
+            input_assembly_state: Some(InputAssemblyState::default()),
+            tessellation_state: None,
+            viewport_state,
+            rasterization_state,
+            multisample_state,
+            depth_stencil_state: None,
+            color_blend_state,
+            dynamic_state,
+            subpass: Some(subpass.into()),
+            ..GraphicsPipelineCreateInfo::layout(layout)
+        };
+        GraphicsPipeline::new(
+            device.clone(),
+            None,
+            create_info,
+        ).expect("Failed to create graphic pipeline")
+    }
+
+    // FRAMEBUFFER
+
+    fn create_framebuffers(
+        render_pass: &Arc<RenderPass>,
+        swap_chain_images: &Vec<Arc<Image>>,
+        image_extent: [u32; 2],
+    ) -> Vec<Arc<Framebuffer>> {
+        swap_chain_images.iter().map(|image| {
+            let view = ImageView::new_default(image.clone())
+                .expect("Failed to create image view");
+            let create_info = FramebufferCreateInfo {
+                attachments: vec![view],
+                extent: image_extent,
+                layers: 1,
+                ..Default::default()
+            };
+            Framebuffer::new(
+                render_pass.clone(),
+                create_info,
+            ).expect("Failed to create framebuffer")
+        }).collect::<Vec<_>>()
+    }
+
+    // VALIDATION LAYERS
 
     fn check_validation_layers(library: &Arc<VulkanLibrary>) -> bool {
         let layer_properties = library.layer_properties()
